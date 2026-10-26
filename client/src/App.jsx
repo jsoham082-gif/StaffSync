@@ -1,7 +1,8 @@
 
 import { useEffect, useState } from "react";
 
-const API_URL = "http://localhost:5000/api/employees";
+const API_ROOT = "http://localhost:5000/api";
+const API_URL = `${API_ROOT}/employees`;
 import "./App.css";
 
 const initialEmployees = [
@@ -82,6 +83,24 @@ function App() {
   const [message, setMessage] = useState("");
   const [loadingEmployees, setLoadingEmployees] = useState(true);
   const [apiError, setApiError] = useState("");
+  const [attendance, setAttendance] = useState([]);
+  const [leaveRequests, setLeaveRequests] = useState([]);
+  const [payrollRecords, setPayrollRecords] = useState([]);
+  const [payrollMonth, setPayrollMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [payrollAllowances, setPayrollAllowances] = useState("0");
+  const [payrollDeductions, setPayrollDeductions] = useState("0");
+  const [settings, setSettings] = useState({
+    companyName: "StaffSync", adminName: "Admin", currency: "INR",
+    departments: ["Engineering", "Human Resources", "Finance", "Design", "Marketing", "Sales", "Operations"],
+    casualLeaveDays: 12, sickLeaveDays: 10, annualLeaveDays: 15,
+    emailNotifications: true, attendanceReminders: true
+  });
+  const [leaveForm, setLeaveForm] = useState({
+    employeeId: "", type: "Casual Leave", startDate: "", endDate: "", reason: ""
+  });
+  const [leaveMessage, setLeaveMessage] = useState("");
+  const [settingsMessage, setSettingsMessage] = useState("");
+  const [moduleMessage, setModuleMessage] = useState("");
 
   async function loadEmployees() {
     try {
@@ -102,9 +121,48 @@ function App() {
     }
   }
 
+  async function loadAttendance() {
+    try {
+      const response = await fetch(`${API_ROOT}/attendance?date=${new Date().toISOString().slice(0, 10)}`);
+      if (!response.ok) throw new Error("Unable to load attendance.");
+      setAttendance(await response.json());
+    } catch (error) { setModuleMessage(error.message); }
+  }
+
+  async function loadLeaves() {
+    try {
+      const response = await fetch(`${API_ROOT}/leaves`);
+      if (!response.ok) throw new Error("Unable to load leave requests.");
+      setLeaveRequests(await response.json());
+    } catch (error) { setModuleMessage(error.message); }
+  }
+
+  async function loadPayroll() {
+    try {
+      const response = await fetch(`${API_ROOT}/payroll?month=${payrollMonth}`);
+      if (!response.ok) throw new Error("Unable to load payroll.");
+      setPayrollRecords(await response.json());
+    } catch (error) { setModuleMessage(error.message); }
+  }
+
+  async function loadSettings() {
+    try {
+      const response = await fetch(`${API_ROOT}/settings`);
+      if (!response.ok) throw new Error("Unable to load settings.");
+      setSettings(await response.json());
+    } catch (error) { setModuleMessage(error.message); }
+  }
+
   useEffect(() => {
     loadEmployees();
+    loadAttendance();
+    loadLeaves();
+    loadSettings();
   }, []);
+
+  useEffect(() => {
+    loadPayroll();
+  }, [payrollMonth]);
 
   const activeCount = employees.filter(
     (employee) => employee.status === "Active"
@@ -375,6 +433,255 @@ function App() {
     );
   }
 
+  const todayKey = new Date().toISOString().slice(0, 10);
+
+  async function markAttendance(employeeId, status, existingRecord = null) {
+    try {
+      const payload = {
+        employeeId,
+        date: todayKey,
+        status,
+        checkIn: existingRecord?.checkIn || (status === "Present" ? new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : ""),
+        checkOut: existingRecord?.checkOut || "",
+        notes: existingRecord?.notes || ""
+      };
+      const response = await fetch(`${API_ROOT}/attendance`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || "Could not save attendance.");
+      setModuleMessage("Attendance saved to MongoDB.");
+      await loadAttendance();
+    } catch (error) { setModuleMessage(error.message); }
+  }
+
+  async function checkOutAttendance(employeeId, record) {
+    try {
+      const response = await fetch(`${API_ROOT}/attendance`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          employeeId, date: todayKey, status: "Present",
+          checkIn: record?.checkIn || "",
+          checkOut: new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }),
+          notes: record?.notes || ""
+        })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || "Could not save check-out.");
+      setModuleMessage("Check-out time saved.");
+      await loadAttendance();
+    } catch (error) { setModuleMessage(error.message); }
+  }
+
+  async function submitLeaveRequest(event) {
+    event.preventDefault();
+    setLeaveMessage("");
+    if (leaveForm.endDate < leaveForm.startDate) {
+      setLeaveMessage("End date cannot be earlier than start date.");
+      return;
+    }
+    try {
+      const response = await fetch(`${API_ROOT}/leaves`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...leaveForm, reason: leaveForm.reason.trim() })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || "Could not submit leave request.");
+      setLeaveForm({ employeeId: "", type: "Casual Leave", startDate: "", endDate: "", reason: "" });
+      setLeaveMessage("Leave request submitted and saved to MongoDB.");
+      await loadLeaves();
+    } catch (error) { setLeaveMessage(error.message); }
+  }
+
+  async function updateLeaveStatus(id, status) {
+    try {
+      const response = await fetch(`${API_ROOT}/leaves/${id}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || "Could not update leave request.");
+      await loadLeaves();
+    } catch (error) { setModuleMessage(error.message); }
+  }
+
+  async function generatePayroll(event) {
+    event.preventDefault();
+    try {
+      const response = await fetch(`${API_ROOT}/payroll/generate`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          month: payrollMonth,
+          allowances: Number(payrollAllowances) || 0,
+          deductions: Number(payrollDeductions) || 0
+        })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || "Could not generate payroll.");
+      setModuleMessage(result.message || "Payroll generated.");
+      await loadPayroll();
+    } catch (error) { setModuleMessage(error.message); }
+  }
+
+  async function updatePayrollStatus(id, status) {
+    try {
+      const response = await fetch(`${API_ROOT}/payroll/${id}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || "Could not update payroll status.");
+      await loadPayroll();
+    } catch (error) { setModuleMessage(error.message); }
+  }
+
+  function renderAttendance() {
+    const recordsByEmployee = Object.fromEntries(
+      attendance.map((record) => [record.employeeId?._id || record.employeeId, record])
+    );
+    const presentCount = attendance.filter((record) => record.status === "Present").length;
+    const absentCount = attendance.filter((record) => record.status === "Absent").length;
+    return (
+      <>
+        <div className="page-heading"><div><h1>Attendance</h1><p>Record attendance and check-in/check-out times for {todayKey}.</p></div></div>
+        <div className="stats-grid">
+          <StatCard icon="✓" label="Present Today" value={presentCount} tone="green" />
+          <StatCard icon="×" label="Absent Today" value={absentCount} tone="orange" />
+          <StatCard icon="♟" label="Total Employees" value={employees.length} tone="purple" />
+          <StatCard icon="◷" label="Not Marked" value={Math.max(0, employees.length - attendance.length)} tone="blue" />
+        </div>
+        {moduleMessage && <p className="success-message">{moduleMessage}</p>}
+        <section className="panel">
+          <div className="panel-heading"><div><h2>Daily Attendance</h2><p>Records are saved in MongoDB.</p></div></div>
+          {employees.length === 0 ? <div className="empty-state"><h3>No employees to mark</h3><p>Add employees first.</p></div> : (
+            <div className="table-wrapper"><table><thead><tr><th>EMPLOYEE</th><th>DEPARTMENT</th><th>STATUS</th><th>CHECK IN</th><th>CHECK OUT</th><th>ACTIONS</th></tr></thead>
+              <tbody>{employees.map((employee) => {
+                const record = recordsByEmployee[employee.id];
+                const status = record?.status || "Not Marked";
+                return <tr key={employee.id}>
+                  <td><div className="employee-cell"><div className="avatar">{employee.name.charAt(0).toUpperCase()}</div><div className="employee-info"><strong>{employee.name}</strong><span>{employee.email}</span></div></div></td>
+                  <td>{employee.department}</td>
+                  <td><span className={`status-badge ${status === "Present" ? "active" : status === "Absent" ? "leave" : ""}`}>{status}</span></td>
+                  <td>{record?.checkIn || "—"}</td><td>{record?.checkOut || "—"}</td>
+                  <td><div className="action-buttons">
+                    <button className="primary-button" type="button" onClick={() => markAttendance(employee.id, "Present", record)}>Present / Check in</button>
+                    <button className="secondary-button" type="button" onClick={() => checkOutAttendance(employee.id, record)}>Check out</button>
+                    <button className="secondary-button" type="button" onClick={() => markAttendance(employee.id, "Absent", record)}>Absent</button>
+                  </div></td>
+                </tr>;
+              })}</tbody></table></div>
+          )}
+        </section>
+      </>
+    );
+  }
+
+  function renderLeaveRequests() {
+    return (
+      <>
+        <div className="page-heading"><div><h1>Leave Requests</h1><p>Submit leave requests and review their status.</p></div></div>
+        <section className="panel">
+          <div className="panel-heading"><div><h2>Apply for Leave</h2><p>Complete the form below to create a request.</p></div></div>
+          <form onSubmit={submitLeaveRequest}>
+            <div className="form-grid">
+              <label>Employee *<select value={leaveForm.employeeId} onChange={(e) => setLeaveForm({...leaveForm, employeeId: e.target.value})} required><option value="">Select employee</option>{employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}</select></label>
+              <label>Leave Type *<select value={leaveForm.type} onChange={(e) => setLeaveForm({...leaveForm, type: e.target.value})}><option>Casual Leave</option><option>Sick Leave</option><option>Annual Leave</option><option>Unpaid Leave</option></select></label>
+              <label>Start Date *<input type="date" value={leaveForm.startDate} onChange={(e) => setLeaveForm({...leaveForm, startDate: e.target.value})} required /></label>
+              <label>End Date *<input type="date" value={leaveForm.endDate} min={leaveForm.startDate || undefined} onChange={(e) => setLeaveForm({...leaveForm, endDate: e.target.value})} required /></label>
+              <label>Reason *<input value={leaveForm.reason} onChange={(e) => setLeaveForm({...leaveForm, reason: e.target.value})} placeholder="Brief reason for leave" required /></label>
+            </div>
+            {leaveMessage && <p className={leaveMessage.includes("submitted") ? "success-message" : "form-error"}>{leaveMessage}</p>}
+            <div className="modal-actions"><button type="submit" className="primary-button">Submit Request</button></div>
+          </form>
+        </section>
+        <section className="panel">
+          <div className="panel-heading"><div><h2>All Requests</h2><p>{leaveRequests.length} request(s)</p></div></div>
+          {leaveRequests.length === 0 ? <div className="empty-state"><h3>No leave requests yet</h3><p>Submitted requests will appear here.</p></div> : (
+            <div className="table-wrapper"><table><thead><tr><th>EMPLOYEE</th><th>TYPE</th><th>DATES</th><th>REASON</th><th>STATUS</th><th>REVIEW</th></tr></thead><tbody>
+              {leaveRequests.map((request) => <tr key={request._id || request.id}><td><strong>{request.employeeName}</strong><br /><span>{request.department}</span></td><td>{request.type}</td><td>{request.startDate}<br />to {request.endDate}</td><td>{request.reason}</td><td><span className={`status-badge ${request.status === "Approved" ? "active" : "leave"}`}>{request.status}</span></td><td>{request.status === "Pending" ? <div className="action-buttons"><button className="primary-button" onClick={() => updateLeaveStatus(request._id || request.id, "Approved")}>Approve</button><button className="secondary-button" onClick={() => updateLeaveStatus(request._id || request.id, "Rejected")}>Reject</button></div> : "Reviewed"}</td></tr>)}
+            </tbody></table></div>
+          )}
+        </section>
+      </>
+    );
+  }
+
+  function renderPayroll() {
+    const totalPayroll = payrollRecords.reduce((sum, record) => sum + (Number(record.grossSalary) || 0), 0);
+    const netPayroll = payrollRecords.reduce((sum, record) => sum + (Number(record.netSalary) || 0), 0);
+    const currencySymbol = settings.currency === "USD" ? "$" : settings.currency === "EUR" ? "€" : "₹";
+    async function processRecord(id) { await updatePayrollStatus(id, "Processed"); }
+    return (
+      <>
+        <div className="page-heading"><div><h1>Payroll</h1><p>Generate monthly salary records and track processing status.</p></div></div>
+        <div className="stats-grid">
+          <StatCard icon="₹" label="Gross Payroll" value={`${currencySymbol}${totalPayroll.toLocaleString("en-IN")}`} tone="purple" />
+          <StatCard icon="✓" label="Net Payroll" value={`${currencySymbol}${netPayroll.toLocaleString("en-IN")}`} tone="green" />
+          <StatCard icon="♟" label="Payroll Records" value={payrollRecords.length} tone="blue" />
+          <StatCard icon="◷" label="Pending" value={payrollRecords.filter((r) => r.status !== "Processed").length} tone="orange" />
+        </div>
+        {moduleMessage && <p className="success-message">{moduleMessage}</p>}
+        <section className="panel">
+          <div className="panel-heading"><div><h2>Generate Payroll</h2><p>Calculates records for all active employees and saves them in MongoDB.</p></div></div>
+          <form onSubmit={generatePayroll}>
+            <div className="form-grid">
+              <label>Payroll Month *<input type="month" value={payrollMonth} onChange={(e) => setPayrollMonth(e.target.value)} required /></label>
+              <label>Allowance per employee<input type="number" min="0" value={payrollAllowances} onChange={(e) => setPayrollAllowances(e.target.value)} /></label>
+              <label>Deduction per employee<input type="number" min="0" value={payrollDeductions} onChange={(e) => setPayrollDeductions(e.target.value)} /></label>
+            </div>
+            <div className="modal-actions"><button className="primary-button" type="submit">Generate Payroll</button></div>
+          </form>
+        </section>
+        <section className="panel">
+          <div className="panel-heading"><div><h2>Salary Register</h2><p>{payrollRecords.length} record(s) for {payrollMonth}. This does not transfer money.</p></div></div>
+          {payrollRecords.length === 0 ? <div className="empty-state"><h3>No payroll generated for this month</h3><p>Use Generate Payroll above to create records.</p></div> : (
+            <div className="table-wrapper"><table><thead><tr><th>EMPLOYEE</th><th>MONTH</th><th>BASIC</th><th>ALLOWANCES</th><th>DEDUCTIONS</th><th>NET SALARY</th><th>STATUS</th><th>ACTION</th></tr></thead>
+              <tbody>{payrollRecords.map((record) => <tr key={record._id}><td><strong>{record.employeeName}</strong></td><td>{record.month}</td><td>{currencySymbol}{Number(record.basicSalary).toLocaleString("en-IN")}</td><td>{currencySymbol}{Number(record.allowances).toLocaleString("en-IN")}</td><td>{currencySymbol}{Number(record.deductions).toLocaleString("en-IN")}</td><td>{currencySymbol}{Number(record.netSalary).toLocaleString("en-IN")}</td><td><span className={`status-badge ${record.status === "Processed" ? "active" : "leave"}`}>{record.status}</span></td><td>{record.status !== "Processed" ? <button className="primary-button" onClick={() => processRecord(record._id)}>Mark Processed</button> : "Complete"}</td></tr>)}</tbody>
+            </table></div>
+          )}
+        </section>
+      </>
+    );
+  }
+
+  function renderSettings() {
+    async function saveSettings(event) {
+      event.preventDefault();
+      setSettingsMessage("");
+      try {
+        const response = await fetch(`${API_ROOT}/settings`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(settings)
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.message || "Could not save settings.");
+        setSettings(result);
+        setSettingsMessage("Settings saved to MongoDB successfully.");
+      } catch (error) { setSettingsMessage(error.message); }
+    }
+    return (
+      <>
+        <div className="page-heading"><div><h1>Settings</h1><p>Configure your workspace and HR policies.</p></div></div>
+        <section className="panel"><div className="panel-heading"><div><h2>Workspace Settings</h2><p>These settings are stored in MongoDB.</p></div></div>
+          <form onSubmit={saveSettings}><div className="form-grid">
+            <label>Company Name<input value={settings.companyName || ""} onChange={(e) => setSettings({...settings, companyName: e.target.value})} required /></label>
+            <label>Administrator Name<input value={settings.adminName || ""} onChange={(e) => setSettings({...settings, adminName: e.target.value})} required /></label>
+            <label>Currency<select value={settings.currency || "INR"} onChange={(e) => setSettings({...settings, currency: e.target.value})}><option value="INR">Indian Rupee (INR ₹)</option><option value="USD">US Dollar (USD $)</option><option value="EUR">Euro (EUR €)</option></select></label>
+            <label>Casual leave days/year<input type="number" min="0" value={settings.casualLeaveDays ?? 12} onChange={(e) => setSettings({...settings, casualLeaveDays: Number(e.target.value)})} /></label>
+            <label>Sick leave days/year<input type="number" min="0" value={settings.sickLeaveDays ?? 10} onChange={(e) => setSettings({...settings, sickLeaveDays: Number(e.target.value)})} /></label>
+            <label>Annual leave days/year<input type="number" min="0" value={settings.annualLeaveDays ?? 15} onChange={(e) => setSettings({...settings, annualLeaveDays: Number(e.target.value)})} /></label>
+            <label className="settings-checkbox"><input type="checkbox" checked={Boolean(settings.emailNotifications)} onChange={(e) => setSettings({...settings, emailNotifications: e.target.checked})} /> Enable email notification preference</label>
+            <label className="settings-checkbox"><input type="checkbox" checked={Boolean(settings.attendanceReminders)} onChange={(e) => setSettings({...settings, attendanceReminders: e.target.checked})} /> Enable attendance reminder preference</label>
+          </div>
+          {settingsMessage && <p className={settingsMessage.includes("successfully") ? "success-message" : "form-error"}>{settingsMessage}</p>}
+          <div className="modal-actions"><button className="primary-button" type="submit">Save Settings</button></div>
+          </form>
+        </section>
+        <section className="panel"><div className="panel-heading"><div><h2>About StaffSync</h2><p>MERN-stack human resource management system.</p></div></div><p>Employee, attendance, leave, payroll and workspace settings records are stored through the backend API in MongoDB.</p></section>
+      </>
+    );
+  }
+
   function renderOtherPage() {
     return (
       <section className="panel coming-soon">
@@ -452,7 +759,10 @@ function App() {
           {loadingEmployees && <p>Loading employee records...</p>}
           {!loadingEmployees && page === "Dashboard" && renderDashboard()}
           {!loadingEmployees && page === "Employees" && renderEmployees()}
-          {!loadingEmployees && !["Dashboard", "Employees"].includes(page) && renderOtherPage()}
+          {page === "Attendance" && renderAttendance()}
+{page === "Leave Requests" && renderLeaveRequests()}
+{page === "Payroll" && renderPayroll()}
+{page === "Settings" && renderSettings()}
         </div>
       </main>
 
